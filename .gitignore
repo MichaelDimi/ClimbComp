@@ -1,0 +1,11 @@
+# node / expo
+node_modules
+.expo
+.expo-shared
+dist
+build
+# mac
+.DS_Store
+# env
+.env
+server/.env
