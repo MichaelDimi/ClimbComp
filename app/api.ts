@@ -233,8 +233,6 @@ export async function deleteDivision(
     );
 }
 
-
-
 // ---- problems & ascents ----
 
 export async function createProblem(

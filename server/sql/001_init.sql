@@ -83,7 +83,8 @@ create table if not exists ascents (
 
 -- Indexes ====================================
 
-create index if not exists idx_users_email on users (email);
+create index if not exists idx_users_email 
+  on users (email);
 
 -- Helpful for filter venues near me
 create index if not exists idx_venues_latlon 
