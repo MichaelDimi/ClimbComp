@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { query } from "../db";
+import { withTransaction, query } from "../db";
 import { requireAuth, optionalAuth, AuthRequest } from "../auth";
 
 const router = Router();
@@ -432,73 +432,102 @@ router.post("/:id/join", requireAuth, async (req: AuthRequest, res, next) => {
             return res.status(401).json({ error: "Unauthenticated" });
         }
 
+        const userId = req.user!.id;
+
         const { id } = req.params;
         const { division_id } = req.body as { division_id?: string };
 
-        // Ensure competition exists and is public (for now)
-        const comps = await query<CompetitionRow>(
-            `
-        SELECT id, is_public, starts_at
-        FROM competitions
-        WHERE id = $1
-        `,
-            [id]
-        );
-        const comp = comps[0];
-        if (!comp) {
-            return res.status(404).json({ error: "Competition not found" });
-        }
-        if (!comp.is_public) {
-            // You can relax this later / add invite-only logic
-            return res.status(403).json({ error: "Competition is not open for public registration" });
-        }
-
-        //disallow joining at or after start time(if defined)
-        if (comp.starts_at && new Date(comp.starts_at) <= new Date()) {
-            return res
-                .status(403)
-                .json({ error: "Registration is closed for this competition" });
-        }
-
-        // Optional: if division_id is provided, verify it belongs to this competition
-        if (division_id) {
-            const divs = await query<DivisionRow>(
-                `
-          SELECT id
-          FROM divisions
-          WHERE id = $1 AND competition_id = $2
-          `,
-                [division_id, id]
+        const participant = await withTransaction(async (client) => {
+            // Ensure competition exists and is public
+            const compRows = await client.query<{
+                id: string; is_public: boolean; starts_at: string | null;
+            }>(`
+                SELECT id, is_public, starts_at
+                FROM competitions
+                WHERE id = $1`,
+                [id]
             );
-            if (divs.length === 0) {
-                return res.status(400).json({ error: "Invalid division for this competition" });
+            const comp = compRows.rows[0];
+            if (!comp) {
+                throw Object.assign(new Error("Competition not found"), { status: 404 });
             }
+            if (!comp.is_public) {
+                throw Object.assign(
+                    new Error("Competition is not open for public registration"),
+                    { status: 403 }
+                );
+            }
+            // disallow joining at or after start time (if defined)
+            if (comp.starts_at && new Date(comp.starts_at) <= new Date()) {
+                throw Object.assign(
+                    new Error("Registration is closed for this competition"),
+                    { status: 403 }
+                );
+            }
+
+            // If division_id provided, verify it belongs to this competition
+            if (division_id) {
+                const divRows = await client.query<{ id: string }>(
+                    `SELECT id
+                     FROM divisions
+                     WHERE id = $1 AND competition_id = $2`,
+                    [division_id, id]
+                );
+                if (divRows.rowCount === 0) {
+                    throw Object.assign(
+                        new Error("Invalid division for this competition"),
+                        { status: 400 }
+                    );
+                }
+            }
+
+            // Upsert participant row
+            const upsert = await client.query<{
+                competition_id: string;
+                user_id: string;
+                division_id: string | null;
+                joined_at: string;
+            }>(`
+                INSERT INTO competition_participants (competition_id, user_id, division_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (competition_id, user_id)
+                DO UPDATE
+                SET division_id = EXCLUDED.division_id,
+                    joined_at   = now()
+                RETURNING competition_id, user_id, division_id, joined_at`,
+                [id, userId, division_id ?? null]
+            );
+            const row = upsert.rows[0];
+
+            // Denormalized fields for UI
+            const userRow = await client.query<{ display_name: string; email: string }>(
+                `SELECT display_name, email FROM users WHERE id = $1`,
+                [userId]
+            );
+            const divName = row.division_id
+                ? (await client.query<{ name: string }>(
+                    `SELECT name FROM divisions WHERE id = $1`,
+                    [row.division_id]
+                )).rows[0]?.name ?? null
+                : null;
+
+            return {
+                competition_id: row.competition_id,
+                user_id: row.user_id,
+                division_id: row.division_id,
+                joined_at: row.joined_at,
+                display_name: userRow.rows[0].display_name,
+                email: userRow.rows[0].email,
+                division_name: divName,
+            };
+        }, "read committed"); // switch to "serializable" in demo if to talk about isolation levels
+
+        return res.status(201).json(participant);
+    } catch (err: any) {
+        // preserve your existing error semantics
+        if (err?.status) {
+            return res.status(err.status).json({ error: err.message });
         }
-
-        // Upsert participant row
-        const rows = await query<ParticipantRow>(
-            `
-        INSERT INTO competition_participants (competition_id, user_id, division_id)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (competition_id, user_id)
-        DO UPDATE
-        SET division_id = EXCLUDED.division_id,
-            joined_at   = now()
-        RETURNING
-          competition_id,
-          user_id,
-          division_id,
-          joined_at,
-          (SELECT display_name FROM users WHERE id = $2) AS display_name,
-          (SELECT email FROM users WHERE id = $2) AS email,
-          (SELECT name FROM divisions WHERE id = competition_participants.division_id) AS division_name
-        `,
-            [id, req.user.id, division_id ?? null]
-        );
-
-        const participant = rows[0];
-        res.status(201).json(participant);
-    } catch (err) {
         next(err);
     }
 });

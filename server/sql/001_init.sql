@@ -106,6 +106,14 @@ create index if not exists idx_ascents_user
 create index if not exists idx_competitions_venue_start
   on competitions (venue_id, starts_at);
 
+-- Speeds joins in reports: ascents <-> problems on problem_id
+create index if not exists idx_ascents_problem 
+  on ascents (problem_id);
+
+-- Speeds counting/aggregating problems per division in reports
+create index if not exists idx_problems_division 
+  on problems (division_id);
+
 
 -- Stored Procedures ===============================
 
